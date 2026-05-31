@@ -393,6 +393,96 @@ async function addTransaction() {
 }
 
 // ── GOOGLE SHEETS SYNC ────────────────────────────────────────────────────────
+// Month column mapping: May2026=B(col2), Jun=C(col3)... Apr2027=M(col13)
+function getBudgetColumn() {
+  const { start } = getCurrentPeriod();
+  // May 2026 = index 0 = col B (2)
+  const base = new Date(2026, 4, 20); // May 20 2026
+  const months = Math.round((start - base) / (1000 * 60 * 60 * 24 * 30));
+  return months + 2; // col B = 2
+}
+
+function colLetter(n) {
+  return String.fromCharCode(64 + n);
+}
+
+// Budget structure from Sheet
+const BUDGET_ROWS = {
+  "INGRESOS": {
+    subcats: {
+      "Sueldo": 7, "Bonos / Extras": 8, "Ganancias Inversión": 9,
+      "Freelance Work": 10, "Préstamos recibidos": 11, "Otros ingresos": 12, "Plata mes pasado": 13
+    },
+    total: 14
+  },
+  "GASTOS": {
+    subcats: {
+      "Recibos Claro": 17, "Recibos (agua/luz/gas)": 18, "Salud": 19,
+      "Manutención mamá": 20, "Entretenimiento": 21, "Regalos": 22,
+      "Clases de natación": 23, "Mercado": 24, "Compras": 25, "Gym": 26,
+      "Ropa": 27, "Pago deudas": 28, "Colsanitas mamá": 29, "Apple Music": 30,
+      "Netflix / Max / Mubi": 31, "Comida Ragnar": 32, "Baño Ragnar": 33,
+      "Empleada de servicio": 34, "Transporte": 35, "Gasolina": 36,
+      "Plata en efectivo": 37, "Otros gastos": 38
+    },
+    total: 39
+  },
+  "AHORROS": {
+    subcats: {
+      "Ahorro vivienda": 42, "Ahorro imprevistos": 43, "Ahorro viaje": 44,
+      "Ahorro carro": 45, "Otros ahorros": 46
+    },
+    total: 47
+  },
+  "INVERSIONES": {
+    subcats: {
+      "Crypto": 50, "Acciones": 51, "CDT": 52,
+      "Negocio": 53, "Mesfix": 54, "Otras inversiones": 55
+    },
+    total: 56
+  }
+};
+
+let budgetData = {}; // { subcat: amount }
+let budgetLoaded = false;
+
+async function loadBudget() {
+  try {
+    const col = colLetter(getBudgetColumn());
+    const sheet = encodeURIComponent('📋 Presupuesto');
+    const range = encodeURIComponent(`${col}7:${col}58`);
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/1EVJrm0akI06IZD0bhIL1aOkO-IGeOAgDYhFaSaWZmI4/values/${sheet}!${range}?key=AIzaSyAckFMjwjrOARahF1QSJwRdV9I_nBfTGnk`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('API error');
+    const json = await res.json();
+    const values = json.values || [];
+
+    // Map row index to value (rows 7-58, so index 0 = row 7)
+    budgetData = {};
+    for (const [cat, info] of Object.entries(BUDGET_ROWS)) {
+      for (const [subcat, row] of Object.entries(info.subcats)) {
+        const idx = row - 7;
+        const val = values[idx] ? parseFloat(String(values[idx][0]).replace(/[^0-9.-]/g,'')) : 0;
+        budgetData[subcat] = isNaN(val) ? 0 : val;
+      }
+    }
+    budgetLoaded = true;
+    updateSaldo();
+    if (document.getElementById('sec-categorias').classList.contains('active')) renderCategories();
+  } catch(err) {
+    console.error('Budget load error:', err);
+  }
+}
+
+function getBudgetFor(subcat) {
+  return budgetData[subcat] || 0;
+}
+
+function getCatBudgetTotal(cat) {
+  if (!BUDGET_ROWS[cat]) return 0;
+  return Object.keys(BUDGET_ROWS[cat].subcats).reduce((s, sub) => s + getBudgetFor(sub), 0);
+}
+
 async function syncToSheets(tx) {
   setSyncState('syncing');
   const btn = document.getElementById('btnAdd');
@@ -403,7 +493,7 @@ async function syncToSheets(tx) {
   const dateStr = `${d}/${m}/${y}`;
 
   try {
-    const res = await fetch(APPS_SCRIPT_URL, {
+    await fetch(APPS_SCRIPT_URL, {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'application/json' },
@@ -416,7 +506,6 @@ async function syncToSheets(tx) {
       })
     });
 
-    // no-cors means we can't read response, but if no exception = success
     transactions = transactions.map(t => t.id === tx.id ? {...t, synced: true} : t);
     saveLocal();
     setSyncState('idle');
@@ -469,8 +558,9 @@ function updateSaldo() {
   const el = document.getElementById('saldoAmount');
   el.textContent = '$ ' + fmtCOP(Math.abs(saldo));
   el.className = 'saldo-amount ' + (saldo >= 0 ? 'positive' : 'negative');
+  const totalEgresos = gastos + ahorros + inversiones;
   document.getElementById('saldoSub').textContent =
-    `Ingresos $${fmtCOP(income)} · Egresos $${fmtCOP(gastos + ahorros + inversiones)}`;
+    `Ingresos $${fmtCOP(income)} · Egresos $${fmtCOP(totalEgresos)}`;
 }
 
 // ── RENDER CATEGORIES ─────────────────────────────────────────────────────────
@@ -484,19 +574,61 @@ function renderCategories() {
 
   let html = '';
   for (const grp of groups) {
-    const grpTotal = cur.filter(t => t.cat === grp.key).reduce((s,t) => s+t.monto, 0);
-    html += `<div class="group-title" style="color:${grp.color}">${grp.icon} ${grp.label} — $${fmtCOP(grpTotal)}</div>`;
+    const grpReal     = cur.filter(t => t.cat === grp.key).reduce((s,t) => s+t.monto, 0);
+    const grpPlanned  = getCatBudgetTotal(grp.key);
+    const grpPct      = grpPlanned > 0 ? Math.min(grpReal / grpPlanned, 1.5) : 0;
+    const grpPctDisp  = Math.round(grpPct * 100);
+    const grpColor    = grpPct >= 1 ? '#F85149' : grpPct >= 0.8 ? '#F0883E' : grp.color;
 
+    html += `<div class="group-title" style="color:${grp.color}">${grp.icon} ${grp.label}</div>`;
+
+    // Group summary card
+    html += `<div class="category-card" style="border-left:3px solid ${grp.color};margin-bottom:12px">
+      <div class="cat-header">
+        <div>
+          <div class="cat-name">Total ${grp.label}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">Planeado: $${fmtCOP(grpPlanned)}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="cat-spent" style="color:${grpColor}">$${fmtCOP(grpReal)}</div>
+          <div style="font-size:11px;color:${grpColor};font-weight:700">${grpPctDisp}%</div>
+        </div>
+      </div>
+      <div style="height:6px;background:var(--bg3);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${Math.min(grpPctDisp,100)}%;background:${grpColor};border-radius:3px;transition:width 0.5s"></div>
+      </div>
+      ${grpPlanned > 0 ? `<div style="font-size:11px;margin-top:6px;color:${grpPct>=1?'#F85149':'var(--muted)'}">
+        ${grpPct >= 1 ? '🚨 Excedido en $'+fmtCOP(grpReal-grpPlanned) : '✅ Quedan $'+fmtCOP(grpPlanned-grpReal)}
+      </div>` : ''}
+    </div>`;
+
+    // Per-subcat cards (only show those with activity or budget)
     SUBCATS[grp.key].forEach(sub => {
-      const spent = cur.filter(t => t.subcat === sub).reduce((s,t) => s+t.monto, 0);
-      if (spent === 0) return;
-      html += `<div class="category-card" style="border-left: 3px solid ${grp.color}">
+      const spent   = cur.filter(t => t.subcat === sub).reduce((s,t) => s+t.monto, 0);
+      const planned = getBudgetFor(sub);
+      if (spent === 0 && planned === 0) return;
+      const pct     = planned > 0 ? Math.min(spent / planned, 1.5) : 0;
+      const pctDisp = Math.round(pct * 100);
+      const barColor = pct >= 1 ? '#F85149' : pct >= 0.8 ? '#F0883E' : grp.color;
+
+      html += `<div class="category-card" style="margin-left:10px;border-left:3px solid ${grp.color}44">
         <div class="cat-header">
-          <div class="cat-name">${sub}</div>
           <div>
-            <div class="cat-spent" style="color:${grp.color}">$${fmtCOP(spent)}</div>
+            <div class="cat-name" style="font-size:12px">${sub}</div>
+            ${planned > 0 ? `<div style="font-size:10px;color:var(--muted)">Planeado: $${fmtCOP(planned)}</div>` : ''}
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:14px;font-weight:700;font-family:'DM Mono',monospace;color:${barColor}">$${fmtCOP(spent)}</div>
+            ${planned > 0 ? `<div style="font-size:11px;color:${barColor};font-weight:600">${pctDisp}%</div>` : ''}
           </div>
         </div>
+        ${planned > 0 ? `
+        <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:${Math.min(pctDisp,100)}%;background:${barColor};border-radius:2px"></div>
+        </div>
+        <div style="font-size:10px;margin-top:5px;color:${pct>=1?'#F85149':'var(--muted)'}">
+          ${pct >= 1 ? '🚨 +$'+fmtCOP(spent-planned) : 'Quedan $'+fmtCOP(planned-spent)}
+        </div>` : ''}
       </div>`;
     });
   }
@@ -597,6 +729,7 @@ function showToast(msg, type = 'success') {
 // ── START ─────────────────────────────────────────────────────────────────────
 init();
 retrySyncing();
+loadBudget();
 </script>
 </body>
 </html>
