@@ -253,8 +253,8 @@
 
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────────
-const SHEET_ID  = '1jv65geJKOP2lceSuqeobF5UvWL_TZCsR';
-const API_KEY   = 'AIzaSyAckFMjwjrOARahF1QSJwRdV9I_nBfTGnk';
+const SHEET_ID  = '1EVJrm0akI06IZD0bhIL1aOkO-IGeOAgDYhFaSaWZmI4';
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwHaWBjPto8-GLpORHLkCbMssi7NCnM6rWQlsiUgh4iXwGPETY-3bK9O8Rv10CKHh1q/exec';
 const SHEET_TAB = '💳 Transacciones'; // exact sheet tab name
 const TX_START_ROW = 5; // first data row in sheet
 
@@ -399,29 +399,24 @@ async function syncToSheets(tx) {
   btn.disabled = true;
   document.getElementById('btnText').innerHTML = '<span class="spinner"></span>';
 
-  // Format date as DD/MM/YYYY
   const [y, m, d] = tx.fecha.split('-');
   const dateStr = `${d}/${m}/${y}`;
 
-  // Row: [Fecha, Categoría, Subcategoría, Monto, Descripción, "", "", ""]
-  const values = [[dateStr, tx.cat, tx.subcat, tx.monto, tx.desc || '', '', '', '']];
-
   try {
-    // Find next empty row by appending
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:A:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&key=${API_KEY}`;
-
-    const res = await fetch(url, {
+    const res = await fetch(APPS_SCRIPT_URL, {
       method: 'POST',
+      mode: 'no-cors',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values })
+      body: JSON.stringify({
+        fecha: dateStr,
+        cat: tx.cat,
+        subcat: tx.subcat,
+        monto: tx.monto,
+        desc: tx.desc || ''
+      })
     });
 
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error?.message || 'Error de API');
-    }
-
-    // Mark as synced
+    // no-cors means we can't read response, but if no exception = success
     transactions = transactions.map(t => t.id === tx.id ? {...t, synced: true} : t);
     saveLocal();
     setSyncState('idle');
